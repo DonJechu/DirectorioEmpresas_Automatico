@@ -1,0 +1,144 @@
+=== 1794449938150.jpg ===
+Empresa:   N/A
+Estado:    DUPLICADO de: MANITAS PARA TO2 [por: teléfono, dirección]
+Confianza: baja
+  - no se halló contacto
+  - sin empresa
+  - No hay datos nuevos, no hay que cambiar nada
+
+=== 1794449938176.jpg ===
+Empresa:   N/A
+Estado:    DUPLICADO de: BENE HOSPITAL (CENTRO ESPAÑOL DE TAMPICO, A.C.) [por: contacto, dirección]
+Confianza: baja
+  - sin bloque de firma
+  - sin empresa
+  - No hay datos nuevos, no hay que cambiar nada
+
+=== 1794449938200.jpg ===
+Empresa:   BENEFICENCIA ESPAÑOLA
+Estado:    DUPLICADO de: BENE HOSPITAL (CENTRO ESPAÑOL DE TAMPICO, A.C.) [por: contacto]
+Confianza: alta
+  - Hay datos nuevos: la fila actualizada está en duplicados.csv
+
+=== 1794449968616.jpg ===
+Empresa:   CFE DISTRIBUCIÓN
+Estado:    DUPLICADO de: CFE [por: nombre, contacto, teléfono]
+Confianza: baja
+  - Firma dice 'Ing. Walter Blagim Rodríguez PuraTA', cuerpo dice 'ING. FROYLAN ALONSO GONZÁLEZ'
+  - Puesto en firma '2 3 ABR 2025 | Jefe de Departamehto de Capacitación Divisionat' difiere del cuerpo 'Jefe de Departamento de Comunicaciones y Control'
+  - La empresa 'CFE DISTRIBUCIÓN' no aparece claro en el membrete (verificar nombre)
+  - No se leyó la dirección
+  - nombre firma≠cuerpo
+  - No hay datos nuevos, no hay que cambiar nada
+
+=== 1794449968647.jpg ===
+Empresa:   N/A
+Estado:    DUPLICADO de: RUNA KITCHEN [por: teléfono]
+Confianza: baja
+  - No se leyó la dirección
+  - no se halló contacto
+  - sin empresa
+  - No hay datos nuevos, no hay que cambiar nada
+
+=== 1794449938150.jpg ===
+Empresa:   N/A
+Estado:    DUPLICADO de: MANITAS PARA TO2 [por: teléfono, dirección]
+Confianza: baja
+  - no se halló contacto
+  - sin empresa
+  - No hay datos nuevos, no hay que cambiar nada
+
+=== 1794449938176.jpg ===
+Empresa:   N/A
+Estado:    DUPLICADO de: BENE HOSPITAL (CENTRO ESPAÑOL DE TAMPICO, A.C.) [por: contacto, dirección]
+Confianza: baja
+  - sin bloque de firma
+  - sin empresa
+  - No hay datos nuevos, no hay que cambiar nada
+
+=== 1794449938150.jpg ===
+Empresa:   N/A
+Confianza: baja
+  - no se halló contacto
+  - sin empresa
+
+=== 1794449938176.jpg ===
+Empresa:   N/A
+Confianza: baja
+  - sin bloque de firma
+  - sin empresa
+
+=== 1794449938200.jpg ===
+Empresa:   BENEFICENCIA ESPAÑOLA
+Confianza: alta
+
+=== 1794449968616.jpg ===
+Empresa:   CFE DISTRIBUCIÓN
+Confianza: baja
+  - Firma dice 'Ing. Walter Blagim Rodríguez PuraTA', cuerpo dice 'ING. FROYLAN ALONSO GONZÁLEZ'
+  - Puesto en firma '2 3 ABR 2025 | Jefe de Departamehto de Capacitación Divisionat' difiere del cuerpo 'Jefe de Departamento de Comunicaciones y Control'
+  - La empresa 'CFE DISTRIBUCIÓN' no aparece claro en el membrete (verificar nombre)
+  - No se leyó la dirección
+  - nombre firma≠cuerpo
+
+=== 1794449968647.jpg ===
+Empresa:   N/A
+Confianza: baja
+  - No se leyó la dirección
+  - no se halló contacto
+  - sin empresa
+
+=== 1794449938150.jpg ===
+Empresa:   MANITAS PARA TO2
+Confianza: alta
+  (info) Supervisor del alumno (según el cuerpo de la carta): Jorge Alberto Vite De La Cruz - Desarrollador de proyectos
+
+=== 1794449938176.jpg ===
+Empresa:   N/A
+Confianza: baja
+  - sin bloque de firma
+  - sin empresa
+
+=== 1794449938200.jpg ===
+Empresa:   BENEFICENCIA ESPAÑOLA
+Confianza: alta
+
+=== 1794449968616.jpg ===
+Empresa:   N/A
+Confianza: baja
+  - No se leyó la dirección
+  - sin bloque de firma
+  - sin empresa
+
+=== 1794449968647.jpg ===
+Empresa:   RUNA KITCHEN
+Confianza: media
+  - No se leyó la dirección
+
+=== 1794449938150.jpg ===
+Empresa:   MANITAS PARA TO2
+Confianza: alta
+  (info) Supervisor del alumno (según el cuerpo de la carta): Jorge Alberto Vite De La Cruz - Desarrollador de proyectos
+
+=== 1794449938176.jpg ===
+Empresa:   N/A
+Confianza: baja
+  - sin bloque de firma
+  - sin empresa
+
+=== 1794449938200.jpg ===
+Empresa:   BENEFICENCIA ESPAÑOLA
+Confianza: alta
+
+=== 1794449968616.jpg ===
+Empresa:   N/A
+Confianza: baja
+  - No se leyó la dirección
+  - sin bloque de firma
+  - sin empresa
+
+=== 1794449968647.jpg ===
+Empresa:   RUNA KITCHEN
+Confianza: media
+  - No se leyó la dirección
+
