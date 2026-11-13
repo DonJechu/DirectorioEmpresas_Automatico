@@ -11,6 +11,15 @@ Idea central: no se "entiende" la hoja, se aprovecha que la plantilla es fija.
   * Se hacen varias lecturas de la misma foto; un teléfono que sale en 2+ lecturas es confiable.
   * Los datos del alumno (nombre, ID) se IGNORAN a propósito.
 
+Memoria de empresas (da consistencia y evita errores de escritura):
+  * Si existe directorio_actual.csv (tu hoja exportada) se usa como base: sus empresas ya están bien escritas.
+  * Cada empresa nueva que se lee se guarda en empresas.json, para las hojas siguientes.
+  * Con cada hoja se calcula un % de coincidencia con las empresas guardadas:
+        nombre 40 + misma calle y número 30 + teléfono en común 20 + mismo dominio de correo 10
+    Con 70% o más (o 3 señales distintas) se reutilizan Empresa, Descripción, Ubicación y Teléfono/Correo
+    guardados; de la hoja solo se toman Contacto y Puesto. Entre 40% y 69% solo se avisa en revision.txt.
+  * Para empezar de cero borra empresas.json.
+
 Instalar:
   pip install rapidocr onnxruntime opencv-python-headless rapidfuzz numpy
   GPU NVIDIA:  pip uninstall -y onnxruntime && pip install onnxruntime-gpu
@@ -27,6 +36,7 @@ Salida (carpeta salida/):
 Las fotos leídas pasan a procesadas/ y las que no se pudieron abrir a errores/.
 """
 import csv
+import json
 import re
 import shutil
 import sys
@@ -42,6 +52,10 @@ from rapidocr import RapidOCR
 # ------------------------------- CONFIG -------------------------------
 BASE = Path(__file__).parent
 INBOX, DONE, FAILED, OUT = (BASE / d for d in ("inbox", "procesadas", "errores", "salida"))
+DIRECTORIO_CSV = BASE / "directorio_actual.csv"   # tu hoja exportada: base de la memoria de empresas
+MEMORY_JSON = BASE / "empresas.json"              # empresas aprendidas de las hojas ya procesadas
+REUSE_SCORE = 70   # % de coincidencia para reutilizar los datos guardados de una empresa (o 3 señales distintas)
+HINT_SCORE = 40    # a partir de aquí solo se avisa en revision.txt: "posible misma empresa"
 LONG_SIDE = 3000   # las fotos de celular se reducen a este lado largo (más grande no mejora el OCR)
 MIN_SCORE = 0.50   # confianza mínima de RapidOCR para aceptar un fragmento de texto
 HEAD6 = ["Empresa", "Descripción", "Ubicación", "Teléfono/Correo", "Contacto", "Puesto"]   # = tu hoja de Google
@@ -518,6 +532,165 @@ def extract(passes: dict[str, str]) -> dict:
     }
 
 
+# ------------------------- MEMORIA DE EMPRESAS -------------------------
+GENERIC_MAIL = {"gmail.com", "hotmail.com", "hotmail.es", "outlook.com", "outlook.es", "yahoo.com", "yahoo.com.mx",
+                "live.com", "live.com.mx", "icloud.com", "msn.com", "prodigy.net.mx"}
+
+
+def entry_from_cells(cells: list[str], origen: str) -> dict:
+    c = (list(cells) + [""] * 6)[:6]
+    return {"empresa": c[0].strip(), "descripcion": c[1].strip() or "N/A", "ubicacion": c[2].strip() or "N/A",
+            "telcorreo": c[3].strip(), "contactos": [x.strip() for x in c[4].splitlines() if x.strip()],
+            "origen": origen, "hojas": 0, "archivos": []}
+
+
+def load_memory() -> list[dict]:
+    memory: list[dict] = []
+    if DIRECTORIO_CSV.exists():
+        with open(DIRECTORIO_CSV, newline="", encoding="utf-8-sig") as f:
+            rows = list(csv.reader(f))
+        start = next((i for i, r in enumerate(rows) if r and r[0].strip().lower() == "empresa"), None)
+        if start is None:
+            raise RuntimeError("No encontré la fila de encabezados ('Empresa') en directorio_actual.csv.")
+        memory += [entry_from_cells(r, "directorio") for r in rows[start + 1:] if r and r[0].strip()]
+    else:
+        print("[AVISO] No hay directorio_actual.csv: la memoria solo usará las hojas ya procesadas.", file=sys.stderr)
+    if MEMORY_JSON.exists():
+        try:
+            memory += json.loads(MEMORY_JSON.read_text(encoding="utf-8")).get("empresas", [])
+        except (ValueError, OSError):
+            print("[AVISO] empresas.json está dañado: se ignora (bórralo para empezar de cero).", file=sys.stderr)
+    return memory
+
+
+def save_learned(memory: list[dict]) -> None:
+    data = {"version": 1, "empresas": [e for e in memory if e["origen"] == "hojas"]}
+    tmp = MEMORY_JSON.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(MEMORY_JSON)
+
+
+def name_variants(n: str) -> list[str]:
+    """'ABSORMEX CMPC TISSUE S.A. DE C.V. (SOFTYS)' -> completo, sin paréntesis y el alias entre paréntesis."""
+    out = [n]
+    base = re.sub(r"\([^)]*\)", " ", n).strip()
+    if base and base != n:
+        out.append(base)
+    out += [x for x in re.findall(r"\(([^)]*)\)", n) if len(clean_company(x)) >= 4]
+    return out
+
+
+def names_match(a: str, b: str) -> bool:
+    """Mismo nombre de empresa. Una sola palabra en común ('HOSPITAL', 'GRUPO') NO basta."""
+    ca = clean_company(a)
+    for v in name_variants(b):
+        cb = clean_company(v)
+        if not ca or not cb:
+            continue
+        if fuzz.token_sort_ratio(ca, cb) >= 88:
+            return True
+        if fuzz.token_set_ratio(ca, cb) == 100 and len(set(ca.split()) & set(cb.split())) >= 2:
+            return True
+    return False
+
+
+def street_key(a: str) -> tuple[str, str | None]:
+    s = strip_accents(a).upper()
+    m = re.search(r"(?<!\d)\d{5}(?!\d)", s)
+    street = s[:m.start()] if m else s
+    street = re.sub(r"\bC\.?\s?P\.?\s*$", "", street.strip())
+    street = re.sub(r"[^\w\s]", " ", street)
+    return re.sub(r"\s+", " ", street).strip(), (m.group(0) if m else None)
+
+
+def addr_match(a: str | None, b: str | None) -> bool:
+    """Misma calle y número (y mismo CP si ambos lo traen). Dos direcciones de Tampico no coinciden por la ciudad."""
+    if not a or not b or "N/A" in (a.strip().upper(), b.strip().upper()):
+        return False
+    (ka, ca), (kb, cb) = street_key(a), street_key(b)
+    if ca and cb and ca != cb:
+        return False
+    if not (set(re.findall(r"\d+", ka)) & set(re.findall(r"\d+", kb))):
+        return False
+    return fuzz.token_set_ratio(ka, kb) >= 85
+
+
+def mail_domains(emails) -> set[str]:
+    return {e.split("@", 1)[1] for e in emails if "@" in e} - GENERIC_MAIL
+
+
+def score_company(rec: dict, e: dict) -> tuple[int, list[str]]:
+    sig, pts = [], 0
+    if rec["empresa"] and names_match(rec["empresa"], e["empresa"]):
+        sig.append("nombre"); pts += 40
+    if addr_match(rec["ubicacion"], e["ubicacion"]):
+        sig.append("dirección"); pts += 30
+    if {re.sub(r"\D", "", p)[:10] for p in rec["telefonos"]} & set(phones_in(e["telcorreo"])):
+        sig.append("teléfono"); pts += 20
+    if mail_domains(rec["correos"]) & mail_domains(emails_in(e["telcorreo"])):
+        sig.append("correo"); pts += 10
+    return pts, sig
+
+
+def find_match(rec: dict, memory: list[dict]) -> tuple[dict | None, int, list[str]]:
+    best, best_pts, best_sig = None, 0, []
+    for e in memory:            # el directorio va primero: en empate gana
+        pts, sig = score_company(rec, e)
+        if pts > best_pts:
+            best, best_pts, best_sig = e, pts, sig
+    return best, best_pts, best_sig
+
+
+def reuse_row(rec: dict, e: dict) -> tuple[list[str], list[str]]:
+    """Fila con los datos guardados de la empresa + contacto y puesto de ESTA hoja.
+    Teléfonos/correos de la carta que no estén guardados se agregan, salvo que sean casi iguales a uno guardado
+    (1 dígito de diferencia / correo muy parecido = probable error de OCR)."""
+    notes = []
+    lines = [l for l in ("" if e["telcorreo"].strip().upper() == "N/A" else e["telcorreo"]).splitlines() if l.strip()]
+    have = {}
+    for i, l in enumerate(lines):
+        for d in phones_in(l):
+            have.setdefault(d, i)
+    have_mail = {m for l in lines for m in emails_in(l)}
+    for ph in rec["telefonos"]:
+        d = re.sub(r"\D", "", ph)[:10]
+        if d in have:
+            i = have[d]
+            if "ext" in ph.lower() and "ext" not in lines[i].lower():
+                lines[i] = ph
+                notes.append(f"Se completó la extensión de un teléfono guardado: {ph}")
+        elif any(sum(x != y for x, y in zip(d, h)) <= 1 for h in have):
+            notes.append(f"Teléfono de la carta ignorado, casi igual a uno guardado (probable error de OCR): {ph}")
+        else:
+            lines.append(ph)
+            have[d] = len(lines) - 1
+            notes.append(f"Teléfono nuevo agregado a la empresa: {ph}")
+    for m in rec["correos"]:
+        if m in have_mail:
+            continue
+        if any(fuzz.ratio(m, h) >= 85 for h in have_mail):
+            notes.append(f"Correo de la carta ignorado, casi igual a uno guardado: {m}")
+        else:
+            lines.append(m)
+            have_mail.add(m)
+            notes.append(f"Correo nuevo agregado a la empresa: {m}")
+    e["telcorreo"] = "\n".join(lines)
+    if rec["nombre"]:
+        if any(fuzz.token_set_ratio(person_key(rec["nombre"]), person_key(c)) >= 90 for c in e["contactos"]):
+            notes.append("Ese contacto ya estaba guardado para esta empresa")
+        else:
+            e["contactos"].append(rec["nombre"])
+    row = [e["empresa"], e["descripcion"], e["ubicacion"], e["telcorreo"] or "N/A",
+           rec["nombre"] or "N/A", rec["puesto"] or "N/A"]
+    return row, notes
+
+
+def confidence_from(notas: list[str]) -> str:
+    if any(n.startswith(("sin bloque", "no se halló")) for n in notas):
+        return "baja"
+    return "alta" if not notas else ("media" if len(notas) <= 2 else "baja")
+
+
 # --------------------------------- SALIDA ---------------------------------
 def rec_to_row6(rec: dict) -> list[str]:
     """Una fila con EXACTAMENTE el formato de tu hoja: varios teléfonos/correos = un renglón cada uno."""
@@ -538,6 +711,7 @@ def main():
     if not files:
         print(f"[AVISO] No hay imágenes (.jpg/.jpeg/.png) en {INBOX}")
         return
+    memory = load_memory()
     out_csv = OUT / "para_pegar.csv"
     nuevo = not out_csv.exists()
     cuenta = Counter()
@@ -553,22 +727,48 @@ def main():
                     for k, v in passes.items():
                         print(f"\n--- {f.name} / {k} ---\n{v}")
                 rec = extract(passes)
-                row6 = rec_to_row6(rec)
+                entry, pts, sig = find_match(rec, memory)
+                reused = entry is not None and (pts >= REUSE_SCORE or len(sig) >= 3)
+                notas, extra, nivel, coinc = list(rec["notas"]), [], rec["confianza"], ""
+                if reused:
+                    origen = "directorio_actual.csv" if entry["origen"] == "directorio" else "hojas anteriores"
+                    row6, extra = reuse_row(rec, entry)
+                    # lo que la carta dijo de empresa/teléfonos/dirección ya no aplica: se usó lo guardado
+                    notas = [n for n in notas if n.startswith(("El contacto", "sin bloque", "no se halló"))]
+                    nivel = confidence_from(notas)
+                    coinc = f'{pts}% con "{entry["empresa"]}" ({origen}) por {", ".join(sig)}: se reutilizaron sus datos'
+                    if rec["empresa"] and clean_company(rec["empresa"]) != clean_company(entry["empresa"]):
+                        extra.insert(0, f"La carta decía: {rec['empresa']}")
+                    if entry["origen"] == "hojas":
+                        entry["hojas"] += 1
+                        entry["archivos"].append(f.name)
+                        save_learned(memory)
+                    cuenta["reconocidas"] += 1
+                else:
+                    row6 = rec_to_row6(rec)
+                    if entry and pts >= HINT_SCORE:
+                        coinc = (f'posible misma empresa que "{entry["empresa"]}" ({pts}% por {", ".join(sig)}); '
+                                 f"NO se reutilizó (hace falta {REUSE_SCORE}% o 3 señales)")
+                    e = entry_from_cells(row6, "hojas")
+                    e["hojas"], e["archivos"] = 1, [f.name]
+                    memory.append(e)
+                    save_learned(memory)
                 w.writerow(row6)
                 fh.flush()
-                rv.write(f"=== {f.name} ===\nEmpresa:   {row6[0]}\nConfianza: {rec['confianza']}\n"
-                         + "".join(f"  - {n}\n" for n in rec["notas"])
+                rv.write(f"=== {f.name} ===\nEmpresa:   {row6[0]}\nConfianza: {nivel}\n"
+                         + (f"Coincidencia: {coinc}\n" if coinc else "")
+                         + "".join(f"  - {n}\n" for n in notas + extra)
                          + "".join(f"  (info) {n}\n" for n in rec["info"]) + "\n")
                 rv.flush()
                 shutil.move(str(f), DONE / f.name)
                 cuenta["ok"] += 1
-                print(f"[OK] {f.name}: {row6[0]} | confianza {rec['confianza']}")
+                print(f"[OK] {f.name}: {row6[0]} | confianza {nivel}" + (f" | reconocida {pts}%" if reused else ""))
             except Exception as ex:
                 print(f"[ERROR] {f.name}: {ex}", file=sys.stderr)
                 shutil.move(str(f), FAILED / f.name)
                 cuenta["errores"] += 1
-    print(f"\nListo: {cuenta['ok']} hojas en salida/para_pegar.csv, {cuenta['errores']} con error (carpeta errores/). "
-          f"Qué revisar: salida/revision.txt")
+    print(f"\nListo: {cuenta['ok']} hojas en salida/para_pegar.csv ({cuenta['reconocidas']} de empresas ya conocidas), "
+          f"{cuenta['errores']} con error (carpeta errores/). Qué revisar: salida/revision.txt")
 
 
 if __name__ == "__main__":
