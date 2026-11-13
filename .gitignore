@@ -1,0 +1,12 @@
+# Datos personales: fotos de cartas (nombres, IDs de alumnos), teléfonos y correos de contactos
+inbox/
+procesadas/
+errores/
+salida/
+directorio_actual.csv
+empresas.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
