@@ -36,7 +36,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from rapidfuzz import fuzz
+from rapidfuzz import fuzz, process
 from rapidocr import RapidOCR
 
 # ------------------------------- CONFIG -------------------------------
@@ -50,7 +50,8 @@ DEBUG = "--debug" in sys.argv
 USE_GPU = "--gpu" in sys.argv
 
 # Anclas tolerantes a errores de OCR: "Teléfono", "Telefono", "Teiéfono", "Te1efono"...
-TEL_ANCHOR = re.compile(r"\bt[eé]?[l1i][eé]?[fp]ono\b", re.I)
+TEL_ANCHOR = re.compile(r"\bt[eé]?[l1i][eé]?[fp]onos?\b", re.I)   # "Teléfono" y "Teléfonos"
+NOMBRE_FIRMA = re.compile(r"nombre\s+y\s+firma", re.I)
 WATERMARK = re.compile(r"^\W*(vigente|autorizado|vigente\s+autorizado)\W*$", re.I)
 CITY_RE = re.compile(
     r"\b(?:tamp|altamira|madero|mante|reynosa|monterrey|m[eé]xico|cdmx)"
@@ -154,6 +155,8 @@ def ocr_passes(path: Path) -> dict[str, str]:
 PHONE_RE = re.compile(
     r"(?<!\d)(?:\+?52[ \t.-]*)?(\(?\d[\d \t().-]{8,16}\d)(?!\d)"
     r"(?:[ \t]*(?:ext(?:ensi[oó]n)?\.?)[ \t]*(\d{1,6}))?", re.I)
+# "(833) 241-BENE (2363)": las letras son el teclado telefónico y los dígitos entre paréntesis las repiten
+KEYPAD_RE = re.compile(r"(\(?\d{3}\)?[ \t.-]*\d{3}[ \t.-]*)[A-Za-z]{4}[ \t]*\(?(\d{4})\)?")
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 
 
@@ -161,6 +164,7 @@ def phones_in(text: str) -> dict[str, str]:
     """{10 dígitos: teléfono formateado}. Si un mismo número sale con y sin extensión, gana el más largo."""
     out: dict[str, str] = {}
     for line in text.splitlines():
+        line = KEYPAD_RE.sub(r"\1\2", line)
         for m in PHONE_RE.finditer(line):
             d = re.sub(r"\D", "", m.group(1))
             if len(d) != 10:
@@ -206,13 +210,22 @@ def company_in_header(empresa: str, header_text: str) -> int:
 
 # Texto que NO es parte del bloque de firma: sellos, folios, "Nombre y firma", fechas de recibido...
 NOISE = re.compile(
-    r"instit|instt|estudios\s+superiores|de\s+tamaulipas|recibido|servicios\s+escolares|nombre\s+y\s+firma|f-?gc"
-    r"|\brev\.?\s*[\d.o]|^\W*\d{1,2}\s+(?:ene|feb|mar|abr|may|jun|jul|ago|sep|oct|nov|dic)", re.I)
+    r"^\W*inst\w{4,8}\s+de\W*$|estudios\s+superiores|^\W*de\s+tamaulipas\W*$|recibido|servicios\s+escolares"
+    r"|nombre\s+y\s+firma|f-?gc|\brev\.?\s*[\d.o]|^\W*\d{1,2}\s+(?:ene|feb|mar|abr|may|jun|jul|ago|sep|oct|nov|dic)", re.I)
 
 
 def first_seg(line: str) -> str:
     """Si el renglón trae varios bloques separados por ' | ' (p. ej. firma + sello), me quedo con el de la izquierda."""
     return line.split(" | ")[0].strip()
+
+
+def best_seg(line: str) -> str:
+    """Primer bloque del renglón que sea texto real: ni sello/folio (NOISE) ni basura de logo (sin 3 letras seguidas)."""
+    for seg in line.split(" | "):
+        seg = seg.strip()
+        if re.search(r"[A-Za-zÁ-úÑñ]{3,}", seg) and not NOISE.search(seg):
+            return seg
+    return ""
 
 
 def phone_only(line: str) -> bool:
@@ -231,41 +244,53 @@ def valid_person(name: str | None) -> bool:
         return False
     n = re.sub(rf"^{TITLES}\b\.?\s*", "", name.strip(), flags=re.I)
     words = n.split()
-    return 2 <= len(words) <= 6 and bool(re.fullmatch(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ.' ]+", n))
+    return (2 <= len(words) <= 6 and bool(re.fullmatch(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ.' ]+", n))
+            and not any(w.startswith("'") or w.endswith("'") for w in words))
 
 
 def parse_signature_block(lines: list[str], header_text: str) -> dict | None:
     """El bloque de firma son 3 renglones (nombre / puesto / empresa) seguidos del teléfono.
     Ancla: la palabra 'Teléfono' o, si la carta no la trae, el primer renglón que es solo un teléfono en la
     mitad inferior de la hoja. Si la empresa ocupa 2 renglones se detecta comparando contra el membrete."""
-    firsts = [first_seg(l) for l in lines]
+    firsts = [best_seg(l) for l in lines]
     idx = None
-    for i in range(len(firsts) - 1, -1, -1):          # el último 'Teléfono': el del bloque de firma
+    for i in range(len(firsts) - 1, -1, -1):          # el último 'Teléfono(s)': el del bloque de firma
         if TEL_ANCHOR.search(firsts[i]):
             idx = i
             break
     if idx is None:
         idx = next((i for i in range(len(lines) // 2, len(lines)) if phone_only(lines[i])), None)
-    if idx is None:
+    before = [l for l in firsts[:idx] if len(l) > 2 and not NOISE.search(l)] if idx is not None else []
+    if len(before) >= 3:
+        nombre, puesto, empresa = before[-3:]
+        score = company_in_header(empresa, header_text)
+        if len(before) >= 4:
+            empresa_b = before[-2] + " " + before[-1]
+            score_b = company_in_header(empresa_b, header_text)
+            if score_b >= 75 and score_b > score + 15:
+                nombre, puesto, empresa, score = before[-4], before[-3], empresa_b, score_b
+        after = [first_seg(lines[idx])]
+        for l in lines[idx + 1: idx + 4]:
+            if phone_only(l) or re.match(r"\s*ext", l, re.I):
+                after.append(first_seg(l))
+            else:
+                break
+        return {"nombre": nombre, "puesto": puesto, "empresa": empresa,
+                "empresa_score": score, "tel_text": "\n".join(after)}
+
+    # Sin ancla de teléfono: los renglones que siguen a "Nombre y firma" son nombre / puesto / empresa
+    lab = next((i for i in range(len(firsts) - 1, -1, -1) if NOMBRE_FIRMA.search(firsts[i])), None)
+    if lab is None:
         return None
-    before = [l for l in firsts[:idx] if len(l) > 2 and not NOISE.search(l)]
-    if len(before) < 3:
+    block = [l for l in firsts[lab + 1:] if len(l) > 2 and not NOISE.search(l)]
+    block = [l for l in block if not TEL_ANCHOR.search(l)]
+    if len(block) < 3:
         return None
-    nombre, puesto, empresa = before[-3:]
+    nombre, puesto, empresa = block[:3]
     score = company_in_header(empresa, header_text)
-    if len(before) >= 4:
-        empresa_b = before[-2] + " " + before[-1]
-        score_b = company_in_header(empresa_b, header_text)
-        if score_b >= 75 and score_b > score + 15:
-            nombre, puesto, empresa, score = before[-4], before[-3], empresa_b, score_b
-    after = [firsts[idx]]
-    for l in lines[idx + 1: idx + 4]:
-        if phone_only(l) or re.match(r"\s*ext", l, re.I):
-            after.append(first_seg(l))
-        else:
-            break
+    tels = [first_seg(l) for l in lines[lab + 1: lab + 8] if phone_only(l)]
     return {"nombre": nombre, "puesto": puesto, "empresa": empresa,
-            "empresa_score": score, "tel_text": "\n".join(after)}
+            "empresa_score": score, "tel_text": "\n".join(tels)}
 
 
 def parse_body_supervisor(lines: list[str]) -> tuple[str, str] | None:
@@ -304,7 +329,81 @@ def format_address(a: str | None) -> str | None:
     a = a.strip().rstrip(",")
     if not re.search(r"C\.?\s?P\.?\s*\d{5}", a, re.I):
         a = re.sub(r"(?<!\d)(\d{5})(?!\d)", r"C.P. \1", a, count=1)
-    return re.sub(r"\bTamps\.?$|\bTam$", "Tam.", a)
+    return re.sub(r"\bTamps\.?$|\bTam$", "Tam.", a, flags=re.I)
+
+
+# ------------------------- MAYÚSCULAS / MINÚSCULAS -------------------------
+SMALL = {"de", "del", "la", "las", "los", "el", "y", "e", "en", "van", "von", "da", "di", "do", "dos", "du", "le"}
+JOB_WORDS = ["director", "directora", "subdirector", "subdirectora", "gerente", "subgerente", "coordinador",
+             "coordinadora", "supervisor", "supervisora", "ingeniero", "ingeniera", "administrador", "administradora",
+             "responsable", "encargado", "encargada", "representante", "presidente", "presidenta", "propietario",
+             "propietaria", "fundador", "fundadora", "titular", "analista", "especialista", "técnico", "técnica",
+             "licenciado", "licenciada", "rector", "rectora", "residente", "superintendente", "desarrollador",
+             "desarrolladora", "contador", "contadora", "auxiliar", "asistente", "líder"]
+_JOB_KEYS = [strip_accents(j) for j in JOB_WORDS]
+
+
+def cap_word(w: str) -> str:
+    if re.fullmatch(r"(?:[A-Za-zÁ-úÑñ]\.){2,}", w):          # M.I.  C.P.  S.A.
+        return w.upper()
+    return "-".join(p[:1].upper() + p[1:].lower() for p in w.split("-"))
+
+
+def title_text(s: str) -> str:
+    """'ING. FROYLAN ALONSO GONZÁLEZ' -> 'Ing. Froylan Alonso González' (de/la/del en minúscula)."""
+    out = []
+    for i, w in enumerate(s.split()):
+        out.append(w.lower() if i > 0 and w.lower() in SMALL else cap_word(w))
+    return " ".join(out)
+
+
+def mostly_upper(s: str) -> bool:
+    letters = [c for c in s if c.isalpha()]
+    return bool(letters) and sum(c.isupper() for c in letters) / len(letters) > 0.7
+
+
+def sentence_case(s: str) -> str:
+    """'Jefe de Departamento de Comunicaciones' -> 'Jefe de departamento de comunicaciones'.
+    Si el texto viene mezclado se respetan las siglas (TI, RH, IMSS); si viene todo en mayúsculas no se puede distinguir."""
+    s = re.sub(r"\s+", " ", s).strip()
+    if not s:
+        return s
+    all_up = s.isupper()
+    words = [w if (not all_up and re.fullmatch(r"[A-ZÁÉÍÓÚÑ]{2,5}[.,;:)]?", w)) else w.lower() for w in s.split(" ")]
+    words[0] = words[0][:1].upper() + words[0][1:]
+    return " ".join(words)
+
+
+def fix_puesto(p: str) -> str:
+    """Corrige errores típicos del OCR en la primera palabra del puesto ('Difector' -> 'Director')."""
+    words = p.split()
+    if words and len(words[0]) >= 6 and strip_accents(words[0]).lower() not in _JOB_KEYS:
+        m = process.extractOne(strip_accents(words[0]).lower(), _JOB_KEYS, scorer=fuzz.ratio)
+        if m and m[1] >= 85:
+            words[0] = JOB_WORDS[m[2]]
+    return " ".join(words)
+
+
+def trim_company(emp: str, header_lines: list[str]) -> str:
+    """Si a la empresa se le pegó texto del sello ('Beneficencia Española INTRO ESPANOL OF TAMPICO'),
+    la recorta a la parte que sí aparece como renglón/bloque del membrete."""
+    ws = emp.split()
+    if len(ws) < 3:
+        return emp
+    pieces = [clean_company(x) for l in header_lines for seg in l.split(" | ") for x in seg.split(",")]
+    pieces = [x for x in pieces if x]
+
+    def sc(t: str) -> int:
+        c = clean_company(t)
+        return int(max((fuzz.ratio(c, h) for h in pieces), default=0)) if c else 0
+
+    full = sc(emp)
+    best_n, best_v = 0, -1
+    for n in range(1, len(ws)):
+        v = sc(" ".join(ws[:n]))
+        if v >= best_v:
+            best_n, best_v = n, v
+    return " ".join(ws[:best_n]) if best_v >= 90 and best_v > full + 10 else emp
 
 
 def strip_company_from_address(addr: str | None, empresa: str | None) -> str | None:
@@ -322,29 +421,30 @@ def extract(passes: dict[str, str]) -> dict:
     header_text = " ".join(L["membrete"] + L["plano"][:15])
     order = ("plano", "firma", "crudo")
 
-    # --- bloque de firma: primera lectura donde salga una persona válida ---
-    sig, respaldo = None, None
-    for k in order:
-        cand = parse_signature_block(L[k], header_text)
-        if not cand:
-            continue
-        if valid_person(cand["nombre"]):
-            sig = cand
-            break
-        respaldo = respaldo or cand
-    sig = sig or respaldo
+    # --- bloque de firma: se lee en cada pasada y gana el nombre que más se repite ---
+    cands = [c for k in order if (c := parse_signature_block(L[k], header_text))]
+    valid = [c for c in cands if valid_person(c["nombre"])]
+    if valid:
+        top = Counter(person_key(c["nombre"]) for c in valid).most_common(1)[0][0]
+        sig = next(c for c in valid if person_key(c["nombre"]) == top)
+    else:
+        sig = cands[0] if cands else None
     body = next((b for k in ("plano", "crudo", "firma") if (b := parse_body_supervisor(L[k]))), None)
 
     nombre = puesto = empresa = None
     info = []
     if sig:
-        nombre, puesto, empresa = sig["nombre"], sig["puesto"], sig["empresa"]
+        nombre, puesto = sig["nombre"], sig["puesto"]
+        empresa = trim_company(sig["empresa"], L["membrete"] + L["plano"][:15])
+        if empresa != sig["empresa"]:
+            sig["empresa_score"] = company_in_header(empresa, header_text)
         if not valid_person(nombre):
             notes.append(f"El contacto '{nombre}' no parece un nombre de persona (verificar)")
         if body:
             if fuzz.token_set_ratio(person_key(nombre), person_key(body[0])) >= 85:
-                if re.match(rf"{TITLES}\b", body[0], re.I):   # conservar el título (Ing., Lic.) si el cuerpo lo trae
-                    nombre = body[0]
+                t = re.match(rf"({TITLES})\.?\s+", body[0], re.I)   # el título (Ing., Lic.) sale del cuerpo; el nombre, de la firma
+                if t and not re.match(rf"{TITLES}\b", nombre, re.I):
+                    nombre = t.group(0).strip() + " " + nombre
             else:  # quien firma y quien supervisa al alumno pueden ser personas distintas: solo se informa
                 info.append(f"Supervisor del alumno (según el cuerpo de la carta): {body[0]} - {body[1]}")
         if sig["empresa_score"] < 60:
@@ -379,6 +479,9 @@ def extract(passes: dict[str, str]) -> dict:
         if votes[k] < 2:
             notes.append(f"Teléfono con poca certeza: {best[k]}")
 
+    if sig and not sig_phones:
+        notes.append("La firma no trae teléfono (revisa si lo pusieron en otra parte de la carta)")
+
     emails: Counter = Counter()
     for txt in passes.values():
         for e in emails_in(txt):
@@ -393,9 +496,17 @@ def extract(passes: dict[str, str]) -> dict:
         ubic = parse_address(L[k])
         if ubic:
             break
-    ubic = format_address(strip_company_from_address(ubic, empresa))
+    ubic = strip_company_from_address(ubic, empresa)
+    if ubic and mostly_upper(ubic):
+        ubic = title_text(ubic)
+    ubic = format_address(ubic)
     if not ubic:
         notes.append("No se leyó la dirección")
+
+    if nombre:   # "Ing.Alma" -> "Ing. Alma"; todo en Mayúscula Inicial
+        nombre = title_text(re.sub(r"(?<=\.)(?=[A-Za-zÁ-úÑñ]{2})", " ", nombre))
+    if puesto:
+        puesto = sentence_case(fix_puesto(puesto))
 
     nivel = "alta" if not conf_flags and not notes else ("media" if len(conf_flags) + len(notes) <= 2 else "baja")
     if "sin bloque de firma" in conf_flags or "no se halló contacto" in conf_flags:
